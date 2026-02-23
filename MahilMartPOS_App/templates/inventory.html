@@ -1,0 +1,271 @@
+{% extends "base.html" %}
+
+{% block title %}Inventory{% endblock %}
+
+{% block style %}
+<style>
+  .inventory-container {
+    background: #fff;
+    padding: 20px;
+    border-radius: 10px;
+    max-width: 100%;
+    margin: 20px auto;
+    box-shadow: 0 0 10px rgba(0,0,0,0.05);
+  }
+
+  .inventory-table th, .inventory-table td {
+    vertical-align: middle;
+    font-size: 14px;
+    white-space: nowrap;
+  }
+
+  .low-stock {
+    color: red;
+    font-weight: bold;
+  }
+
+  .table-responsive {
+    overflow-x: auto;
+  }
+
+  .search-bar {
+    max-width: 300px;
+    float: right;
+    margin-bottom: 10px;
+    margin-left: 0;
+  }
+
+  .btn-medium {
+    padding: 8px 16px;
+    font-size: 15px;
+    border-radius: 6px;
+  }
+
+  /* loader */
+  #loading-text {
+    display: none;
+    padding: 8px;
+  }
+
+  /* small visual for fallback button area */
+  #load-more-button {
+    min-width: 120px;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="inventory-container">
+  <h3>Inventory Overview</h3>
+
+  <div class="d-flex justify-content-start">
+    <form method="get" class="search-bar" id="search-form">
+      <input type="text" name="q" value="{{ query }}" class="form-control form-control-sm" placeholder="Search products..." id="search-input">
+    </form>
+  </div>
+
+  <div class="d-flex justify-content-between align-items-center mt-3 mb-2">
+    <div>
+      <!-- <a href="{% url 'stock_adjustment' %}" class="btn btn-sm btn-primary " tabindex="-1" aria-disabled="true">Stock Adjustment</a>
+      <a href="{% url 'stock_adjustment_list' %}"   class="btn btn-sm btn-success " tabindex="-1" aria-disabled="true">View Adjusted Stock</a> -->
+      <a href="{% url 'split_stock' %}" class="btn btn-sm btn-success">Bulk Stock Details</a>
+    </div>
+  </div> 
+
+  <div class="table-responsive mt-3">
+    <table class="table table-bordered table-sm inventory-table">
+      <thead class="table-light">
+        <tr>
+          <th>S no</th>
+          <th>Inventory ID</th>
+          <th>Supplier ID</th>
+          <th>Item Name</th>
+          <th>Item Code</th>
+          <th>Group</th>
+          <th>Brand</th>
+          <th>Unit</th>
+          <th>HSN Code</th>
+          <th>MRP</th>
+          <th>Cost Price</th>
+          <th>Sale Price</th>
+          <th>Discount</th>
+          <th>Tax</th>
+          <th>Net Price</th>
+          <th>Quantity</th>          
+          <th>Purchased At</th>
+          <th>Batch No</th>
+          <th>Expiry Date</th>      
+        </tr>
+      </thead>
+
+      <tbody id="inventory-body">
+        {% include "partials/inventory_rows.html" with items=items start_index=start_index %}
+      </tbody>
+    </table>
+  </div>
+
+  <div id="loading-row" class="text-center mt-2">
+    <span id="loading-text">Loading...</span>
+  </div>
+
+  <!-- sentinel used by IntersectionObserver -->
+  <div id="scroll-sentinel" style="height:1px;"></div>
+
+  <!-- fallback manual load-more button (hidden by default) -->
+  <div class="text-center mt-2">
+    <button id="load-more-button" class="btn btn-sm btn-primary" style="display:none;">Load more</button>
+  </div>
+
+  {% if not items %}
+  <div class="text-center text-muted mt-3">No products found.</div>
+  {% endif %}
+</div>
+
+<script>
+(function() {
+  // --- Variables from server-rendered template ---
+  let page = {{ items.number }};
+  let hasNext = {{ has_next|yesno:"true,false" }};
+  const inventoryBody = document.getElementById('inventory-body');
+  const loadingText = document.getElementById('loading-text');
+  const sentinel = document.getElementById('scroll-sentinel');
+  const loadMoreBtn = document.getElementById('load-more-button');
+  const searchInput = document.getElementById('search-input');
+
+  // runtime state
+  let loading = false;
+  let userInteracted = false; // only start auto-load after user scroll/keypress/touch
+
+  // debug helper
+  function log(...args) {
+    if (window.console) console.log('[inv-scroll]', ...args);
+  }
+
+  // build query portion (q) if search exists
+  function currentQuery() {
+    const q = encodeURIComponent(searchInput ? searchInput.value.trim() : '');
+    return q ? '&q=' + q : '';
+  }
+
+  // Make the ajax request to fetch next page
+  function loadMore() {
+    if (loading || !hasNext) return;
+    loading = true;
+    page += 1;
+    loadingText.style.display = 'inline';
+    log('loading page', page);
+
+    const url = window.location.pathname + '?page=' + page + currentQuery();
+
+    fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+      .then(resp => {
+        if (!resp.ok) {
+          throw new Error('Network response was not ok: ' + resp.status);
+        }
+        return resp.json();
+      })
+      .then(data => {
+        loadingText.style.display = 'none';
+        if (data.html && data.html.trim()) {
+          inventoryBody.insertAdjacentHTML('beforeend', data.html);
+          log('appended html for page', page);
+        } else {
+          log('no html returned for page', page);
+        }
+        hasNext = data.has_next;
+        loading = false;
+
+        // hide fallback button when no more pages
+        if (!hasNext) {
+          log('no more pages');
+          loadMoreBtn.style.display = 'none';
+          if (sentinel) sentinel.style.display = 'none';
+        }
+      })
+      .catch(err => {
+        console.error('[inv-scroll] loadMore error:', err);
+        loadingText.style.display = 'none';
+        loading = false;
+        // show manual button as fallback (so user can still get more results)
+        if (loadMoreBtn) loadMoreBtn.style.display = 'inline-block';
+      });
+  }
+
+  // --------- Activate observer only after user interacts ----------
+  // mark user interaction (one-time)
+  function markUserInteracted() {
+    if (userInteracted) return;
+    userInteracted = true;
+    log('user interacted — enabling auto-load');
+    // remove initial listeners
+    window.removeEventListener('wheel', markUserInteracted);
+    window.removeEventListener('touchstart', markUserInteracted);
+    window.removeEventListener('keydown', markUserInteracted);
+  }
+
+  window.addEventListener('wheel', markUserInteracted, { passive: true });
+  window.addEventListener('touchstart', markUserInteracted, { passive: true });
+  window.addEventListener('keydown', markUserInteracted, { passive: true });
+
+  // --------- IntersectionObserver setup ----------
+  let observer;
+  function initObserver() {
+    if (!sentinel) {
+      log('No sentinel element found; manual fallback only');
+      if (loadMoreBtn) loadMoreBtn.style.display = 'inline-block';
+      return;
+    }
+
+    if (!('IntersectionObserver' in window)) {
+      log('IntersectionObserver not supported — relying on manual fallback');
+      if (loadMoreBtn) loadMoreBtn.style.display = 'inline-block';
+      return;
+    }
+
+    observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          // only load automatically if user has interacted
+          if (userInteracted) {
+            log('sentinel intersecting and userInteracted true — calling loadMore');
+            loadMore();
+          } else {
+            log('sentinel intersecting but user has NOT interacted yet — doing nothing');
+          }
+        }
+      });
+    }, {
+      root: null,
+      rootMargin: '500px', // preload earlier
+      threshold: 0
+    });
+
+    observer.observe(sentinel);
+    log('observer initialized; observing sentinel');
+  }
+
+  // initialize observer after a short delay to ensure DOM stable
+  window.addEventListener('load', function() {
+    setTimeout(initObserver, 100);
+  });
+
+  // Manual fallback button click
+  if (loadMoreBtn) {
+    loadMoreBtn.addEventListener('click', function() {
+      markUserInteracted();
+      loadMoreBtn.style.display = 'none';
+      loadMore();
+    });
+  }
+
+  // Expose small debug controls in console:
+  window.INV_SCROLL = {
+    loadMoreManual: loadMore,
+    enableObserver: function(){ if (observer && sentinel) observer.observe(sentinel); },
+    disableObserver: function(){ if (observer) observer.disconnect(); },
+    state: function(){ return {page, hasNext, loading, userInteracted}; }
+  };
+
+})();
+</script>
+{% endblock %}
