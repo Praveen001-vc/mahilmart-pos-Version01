@@ -302,6 +302,28 @@ def _open_browser(browser_host, port):
     webbrowser.open(f"http://{target_host}:{port}/")
 
 
+def _env_bool(name, default=False):
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _split_email_values(value):
+    items = []
+    seen = set()
+    for part in str(value or "").replace(";", ",").split(","):
+        email = part.strip()
+        if not email:
+            continue
+        key = email.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(email)
+    return items
+
+
 def _setup_logging():
     log_dir = Path.home() / "MahilMartPOS" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -590,27 +612,88 @@ def _send_pending_activation_email():
         logging.error("Activation notice file missing required fields: %s", notice_path)
         return
 
+    # Try to apply SMTP config from app settings DB first, if available.
+    try:
+        from MahilMartPOS_App.utils.email_config import apply_email_settings
+
+        apply_email_settings()
+    except Exception:
+        logging.info("EmailConfig settings not applied for activation email; using env/default SMTP.")
+
+    from django.conf import settings
     from django.core.mail import get_connection, send_mail
 
     default_alert_email = "mahiltechlab.ops@gmail.com"
     configured_alert_email = (os.environ.get("MAHILMARTPOS_LICENSE_ALERT_EMAIL") or "").strip()
-    license_app_password = (
-        os.environ.get("MAHILMARTPOS_LICENSE_ALERT_APP_PASSWORD") or "kylfneblqxccaimx"
+    configured_alert_emails = _split_email_values(os.environ.get("MAHILMARTPOS_LICENSE_ALERT_EMAILS", ""))
+
+    smtp_host = (
+        os.environ.get("MAHILMARTPOS_LICENSE_SMTP_HOST")
+        or getattr(settings, "EMAIL_HOST", "")
+        or "smtp.gmail.com"
     ).strip()
-    if not default_alert_email or not license_app_password:
-        logging.warning("Activation email skipped because dedicated license email credentials are missing.")
-        return
 
-    recipients = [default_alert_email]
-    if configured_alert_email and configured_alert_email.lower() != default_alert_email.lower():
-        recipients.append(configured_alert_email)
+    smtp_port_raw = (
+        os.environ.get("MAHILMARTPOS_LICENSE_SMTP_PORT")
+        or str(getattr(settings, "EMAIL_PORT", "587") or "587")
+    ).strip()
+    try:
+        smtp_port = int(smtp_port_raw)
+    except ValueError:
+        smtp_port = 587
 
-    from_email = default_alert_email
+    smtp_use_tls = _env_bool(
+        "MAHILMARTPOS_LICENSE_SMTP_USE_TLS",
+        default=bool(getattr(settings, "EMAIL_USE_TLS", True)),
+    )
+
+    smtp_username = (
+        os.environ.get("MAHILMARTPOS_LICENSE_SMTP_USER")
+        or configured_alert_email
+        or getattr(settings, "EMAIL_HOST_USER", "")
+        or default_alert_email
+    ).strip()
+    smtp_password = (
+        os.environ.get("MAHILMARTPOS_LICENSE_SMTP_PASSWORD")
+        or os.environ.get("MAHILMARTPOS_LICENSE_ALERT_APP_PASSWORD")
+        or getattr(settings, "EMAIL_HOST_PASSWORD", "")
+    ).strip()
+
+    from_email = (
+        os.environ.get("MAHILMARTPOS_LICENSE_FROM_EMAIL")
+        or getattr(settings, "DEFAULT_FROM_EMAIL", "")
+        or smtp_username
+        or default_alert_email
+    ).strip()
+
     smtp_timeout_raw = os.environ.get("MAHILMARTPOS_LICENSE_EMAIL_TIMEOUT", "8").strip()
     try:
         smtp_timeout = float(smtp_timeout_raw)
     except ValueError:
         smtp_timeout = 8.0
+
+    recipients = []
+    recipients.extend(configured_alert_emails)
+    if configured_alert_email:
+        recipients.append(configured_alert_email)
+
+    for _name, admin_email in getattr(settings, "ADMINS", []):
+        if admin_email:
+            recipients.append(admin_email)
+
+    recipients.append(default_alert_email)
+    recipients = _split_email_values(",".join(recipients))
+
+    if not smtp_host or not smtp_username or not smtp_password or not recipients:
+        logging.warning(
+            "Activation email skipped due to incomplete SMTP config "
+            "(host_set=%s user_set=%s pass_set=%s recipients=%d).",
+            bool(smtp_host),
+            bool(smtp_username),
+            bool(smtp_password),
+            len(recipients),
+        )
+        return
 
     subject = "MahilMart POS Machine ID (Setup)"
     body = (
@@ -624,11 +707,11 @@ def _send_pending_activation_email():
     try:
         connection = get_connection(
             backend="django.core.mail.backends.smtp.EmailBackend",
-            host="smtp.gmail.com",
-            port=587,
-            username=default_alert_email,
-            password=license_app_password,
-            use_tls=True,
+            host=smtp_host,
+            port=smtp_port,
+            username=smtp_username,
+            password=smtp_password,
+            use_tls=smtp_use_tls,
             timeout=smtp_timeout,
             fail_silently=False,
         )
